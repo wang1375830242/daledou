@@ -1,13 +1,9 @@
 """
-本模块为大乐斗其它任务，只能命令行手动运行
-
-使用以下命令运行本模块任务：
-    >>> python main.py --other
+本模块为大乐斗其它任务
 """
 
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 from ..core.daledou import DaLeDou, print_separator, Input
 
@@ -29,17 +25,6 @@ def compute(fail_value, consume_num, now_value, total_value) -> int:
     # 计算总消耗材料数量
     total_deplete = upgrade_count * consume_num
     return total_deplete
-
-
-def get_backpack_number(d: DaLeDou, item_id: str) -> int:
-    """返回背包物品id数量"""
-    # 背包物品详情
-    d.get(f"cmd=owngoods&id={item_id}")
-    if "很抱歉" in d.html:
-        number = 0
-    else:
-        number = d.find(r"数量：(\d+)")
-    return int(number)
 
 
 def get_blessing_value(d: DaLeDou) -> tuple[int, int]:
@@ -65,7 +50,7 @@ def get_consume(d: DaLeDou, backpack_id: str = None) -> tuple[str, int, int]:
     if backpack_id is None:
         possess_num = int(d.find(r"消耗：.*?\d+.*?(\d+)"))
     else:
-        possess_num = get_backpack_number(d, backpack_id)
+        possess_num = d.get_backpack_number(backpack_id)
     return consume_name, consume_num, possess_num
 
 
@@ -78,23 +63,32 @@ def get_store_points(d: DaLeDou, params: str) -> int:
     return int(store_points)
 
 
+def is_close_auto_buy(d: DaLeDou, name: str, close_url: str) -> bool:
+    """是否关闭自动斗豆兑换"""
+    # 关闭自动斗豆兑换
+    d.get(close_url)
+    if "关闭自动" in d.html or "关闭斗豆" in d.html:
+        d.log("存在没有关闭自动斗豆兑换，请手动关闭", name)
+        return False
+    d.log("关闭自动斗豆兑换", name)
+    print_separator()
+    return True
+
+
 class Exchange:
     """积分商店兑换"""
 
     def __init__(
         self,
         d: DaLeDou,
-        url: dict,
+        exchange_url: str,
         consume_num: int,
         possess_num: int,
         store_name: str,
         regex: str | None = None,
     ):
         self.d = d
-        # 材料兑换10个链接
-        self.exchange_ten_url = url["ten"]
-        # 材料兑换一个链接
-        self.exchange_one_url = url["one"]
+        self.exchange_url = exchange_url
         self.consume_num = consume_num
         self.possess_num = possess_num
         self.store_name = store_name
@@ -108,21 +102,37 @@ class Exchange:
             成功兑换差值则返回True
             不足兑换差值则返回False
         """
-        print_separator()
         if self.possess_num >= self.consume_num:
             return True
 
         exchange_num = self.consume_num - self.possess_num
 
-        if self.exchange_ten_url == self.exchange_one_url:
-            # 有些物品只能一个兑换，比如江湖长梦、许愿帮铺
-            if not self.exchange_count(self.exchange_one_url, exchange_num):
+        if "江湖长梦" in self.store_name:
+            # 只能一个兑换
+            if not self.execute_exchange(self.exchange_url, exchange_num):
+                return False
+        elif self.store_name == "竞技场":
+            # 只能一个兑换和十个兑换
+            ten_count, one_count = divmod(exchange_num, 10)
+            ten_url = f"{self.exchange_url}&times=10"
+            one_url = f"{self.exchange_url}&times=1"
+            if not self.execute_exchange(ten_url, ten_count):
+                return False
+            if not self.execute_exchange(one_url, one_count):
+                return False
+        elif self.store_name == "许愿帮铺":
+            # 只能一个兑换和25个兑换
+            twenty_five_count, one_count = divmod(exchange_num, 25)
+            twenty_five_url = f"{self.exchange_url}&times=25"
+            one_url = self.exchange_url
+            if not self.execute_exchange(twenty_five_url, twenty_five_count):
+                return False
+            if not self.execute_exchange(one_url, one_count):
                 return False
         else:
-            ten_count, one_count = divmod(exchange_num, 10)
-            if not self.exchange_count(self.exchange_ten_url, ten_count):
-                return False
-            if not self.exchange_count(self.exchange_one_url, one_count):
+            # 一次批量兑换
+            url = f"{self.exchange_url}&times={exchange_num}"
+            if not self.execute_exchange(url, 1):
                 return False
 
         # 兑换成功则两者数量一致
@@ -130,15 +140,14 @@ class Exchange:
         print_separator()
         return True
 
-    def exchange_count(self, url: str, count: int) -> bool:
+    def execute_exchange(self, url: str, count: int) -> bool:
         """兑换足够数量返回True，否则返回False"""
         while count > 0:
             self.d.get(url)
             self.d.log(self.d.find(self.regex), self.store_name)
             if "成功" in self.d.html:
                 count -= 1
-            elif "不足" in self.d.html or "达到当日兑换上限" in self.d.html:
-                print_separator()
+            else:
                 return False
         return True
 
@@ -146,6 +155,7 @@ class Exchange:
         """更新材料拥有数量"""
         if self.possess_num >= self.consume_num:
             self.possess_num -= self.consume_num
+        print_separator()
 
 
 class BaseUpgrader(ABC):
@@ -160,25 +170,15 @@ class BaseUpgrader(ABC):
         consume_num = self.data[name]["consume_num"]
         possess_num = self.data[name]["possess_num"]
         store_name = self.data[name]["store_name"]
+        exchange_url = exchange_url_map[consume_name]
         return Exchange(
             self.d,
-            exchange_url_map[consume_name],
+            exchange_url,
             consume_num,
             possess_num,
             store_name,
             regex,
         )
-
-    def is_close_auto_buy(self, name: str, close_url: str) -> bool:
-        """是否关闭自动斗豆兑换"""
-        print_separator()
-        # 关闭自动斗豆兑换
-        self.d.get(close_url)
-        if "关闭自动" in self.d.html or "关闭斗豆" in self.d.html:
-            self.d.log("存在没有关闭自动斗豆兑换，请手动关闭", name)
-            return False
-        self.d.log("关闭自动斗豆兑换", name)
-        return True
 
     @abstractmethod
     def get_data(self) -> dict[str, dict]:
@@ -192,14 +192,12 @@ class BaseUpgrader(ABC):
 def upgrade(upgrader: BaseUpgrader):
     """执行升级流程"""
     if not upgrader.data:
-        print_separator()
-        print("没有可强化的任务")
+        print("没有可强化的任务\n")
         print_separator()
         return
 
     upgrade_names = []
     for name, data in upgrader.data.items():
-        print_separator()
         if data.get("是否强化", False):
             upgrade_names.append(name)
         for k, v in data.items():
@@ -212,8 +210,8 @@ def upgrade(upgrader: BaseUpgrader):
             }:
                 continue
             print(f"{k}：{v}")
+        print_separator()
 
-    print_separator()
     selected = Input.select("请选择强化任务：", upgrade_names)
     if selected is None:
         print_separator()
@@ -227,13 +225,8 @@ def upgrade(upgrader: BaseUpgrader):
 
 
 class AoYi(BaseUpgrader):
-    """奥义自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "奥秘元素": {
-            "ten": "cmd=exchange&subtype=2&type=1261&times=10&costtype=12",
-            "one": "cmd=exchange&subtype=2&type=1261&times=1&costtype=12",
-        }
+        "奥秘元素": "cmd=exchange&subtype=2&type=1261&costtype=12",
     }
 
     def __init__(self, d: DaLeDou):
@@ -284,7 +277,7 @@ class AoYi(BaseUpgrader):
     def upgrade(self, name: str):
         """奥义升级"""
         close_url = "cmd=skillEnhance&op=9&autoBuy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -303,13 +296,8 @@ class AoYi(BaseUpgrader):
 
 
 class JiNengLan(BaseUpgrader):
-    """奥义技能栏自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "四灵魂石": {
-            "ten": "cmd=exchange&subtype=2&type=1262&times=10&costtype=12",
-            "one": "cmd=exchange&subtype=2&type=1262&times=1&costtype=12",
-        }
+        "四灵魂石": "cmd=exchange&subtype=2&type=1262&costtype=12",
     }
 
     def __init__(self, d: DaLeDou):
@@ -367,7 +355,7 @@ class JiNengLan(BaseUpgrader):
         """奥义技能栏升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=skillEnhance&op=10&storage_id={_id}&auto_buy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -386,10 +374,6 @@ class JiNengLan(BaseUpgrader):
 
 
 def 奥义(d: DaLeDou):
-    """
-    奥义：自动兑换强化
-    技能栏：自动兑换强化
-    """
     while True:
         category = Input.select("请选择分类：", ["奥义", "技能栏"])
         if category is None:
@@ -401,7 +385,6 @@ def 奥义(d: DaLeDou):
 
 
 def 背包(d: DaLeDou):
-    """背包搜索工具"""
     data = []
     d.get("cmd=store")
     page = int(d.find(r"第1/(\d+)"))
@@ -425,43 +408,66 @@ def 背包(d: DaLeDou):
                 results.append(item)
         return results
 
+    def get_display_width(text):
+        """计算字符串的显示宽度（中文算2个字符，英文算1个）"""
+        width = 0
+        for char in text:
+            # 中文、日文、韩文等全角字符算2个宽度
+            if "\u4e00" <= char <= "\u9fff" or char in "：；，。！？（）【】「」":
+                width += 2
+            else:
+                width += 1
+        return width
+
+    def pad_to_width(text, target_width):
+        """将文本填充到目标宽度"""
+        current_width = get_display_width(text)
+        if current_width >= target_width:
+            return text
+        return text + " " * (target_width - current_width)
+
     while True:
-        print_separator()
         text = Input.text("请输入物品ID或名称:")
         if text is None:
             break
 
         search_term = text.strip()
         if results := search_backpack(search_term):
-            print(f"\n{'ID':<5}{'物品名称':<10}{'数量':<8}")
+            # 计算每列的最大显示宽度
+            id_width = max(
+                get_display_width("ID"),
+                max(get_display_width(item["id"]) for item in results),
+            )
+            name_width = max(
+                get_display_width("物品名称"),
+                max(get_display_width(item["name"]) for item in results),
+            )
+            number_width = max(
+                get_display_width("数量"),
+                max(get_display_width(item["number"]) for item in results),
+            )
+
+            # 打印表头
+            header = f"{pad_to_width('ID', id_width)} {pad_to_width('物品名称', name_width)} {pad_to_width('数量', number_width)}"
+            print(f"\n{header}")
             print_separator()
+
+            # 打印数据行
             for item in results:
-                print(f"{item['id']:<5}{item['name']:<10}{item['number']:<8}")
+                row = f"{pad_to_width(item['id'], id_width)} {pad_to_width(item['name'], name_width)} {pad_to_width(item['number'], number_width)}"
+                print(row)
             print()
         else:
             print("\n⚠️ 未找到匹配物品")
+        print_separator()
 
 
 class JiTanShouHuShou(BaseUpgrader):
-    """祭坛守护兽自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "大型武器符咒": {
-            "ten": "cmd=longdreamexchange&op=exchange&key_id=19&page=2",
-            "one": "cmd=longdreamexchange&op=exchange&key_id=19&page=2",
-        },
-        "中型武器符咒": {
-            "ten": "cmd=longdreamexchange&op=exchange&key_id=20&page=2",
-            "one": "cmd=longdreamexchange&op=exchange&key_id=20&page=2",
-        },
-        "小型武器符咒": {
-            "ten": "cmd=longdreamexchange&op=exchange&key_id=21&page=2",
-            "one": "cmd=longdreamexchange&op=exchange&key_id=21&page=2",
-        },
-        "投掷武器符咒": {
-            "ten": "cmd=longdreamexchange&op=exchange&key_id=21&page=2",
-            "one": "cmd=longdreamexchange&op=exchange&key_id=21&page=2",
-        },
+        "大型武器符咒": "cmd=longdreamexchange&op=exchange&key_id=19&page=2",
+        "中型武器符咒": "cmd=longdreamexchange&op=exchange&key_id=20&page=2",
+        "小型武器符咒": "cmd=longdreamexchange&op=exchange&key_id=21&page=2",
+        "投掷武器符咒": "cmd=longdreamexchange&op=exchange&key_id=22&page=2",
     }
 
     REGEX = r"</a><br />(.*?)<"
@@ -531,7 +537,7 @@ class JiTanShouHuShou(BaseUpgrader):
         """祭坛守护兽升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=weapon_seal&op=9&type_id={_id}&auto_buy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP, self.REGEX)
@@ -550,13 +556,8 @@ class JiTanShouHuShou(BaseUpgrader):
 
 
 class FengYinJiTan(BaseUpgrader):
-    """封印祭坛自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "石中剑": {
-            "ten": "cmd=longdreamexchange&op=exchange&key_id=19&page=2",
-            "one": "cmd=longdreamexchange&op=exchange&key_id=19&page=2",
-        }
+        "石中剑": "cmd=longdreamexchange&op=exchange&key_id=18&page=2",
     }
 
     REGEX = r"</a><br />(.*?)<"
@@ -611,7 +612,7 @@ class FengYinJiTan(BaseUpgrader):
         """祭坛守护兽升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=weapon_seal&op=10&sacrificial_id={_id}&auto_buy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP, self.REGEX)
@@ -630,10 +631,6 @@ class FengYinJiTan(BaseUpgrader):
 
 
 def 封印(d: DaLeDou):
-    """
-    祭坛守护兽：自动兑换强化
-    封印祭坛：自动兑换强化
-    """
     while True:
         category = Input.select("请选择分类：", ["祭坛守护兽", "封印祭坛"])
         if category is None:
@@ -645,9 +642,7 @@ def 封印(d: DaLeDou):
 
 
 def 掠夺(d: DaLeDou):
-    """自动掠夺不高于最大战力的成员"""
     while True:
-        print_separator()
         max_combat_power = Input.number("请输入掠夺最大战力：")
         if max_combat_power is None:
             return
@@ -671,36 +666,17 @@ def 掠夺(d: DaLeDou):
                 if "你已经没有足够的复活次数" in d.html:
                     return
                 time.sleep(1)
+        print_separator()
 
 
 class ShenZhuang(BaseUpgrader):
-    """神装自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "凤凰羽毛": {
-            "ten": "cmd=exchange&subtype=2&type=1100&times=10&costtype=1",
-            "one": "cmd=exchange&subtype=2&type=1100&times=1&costtype=1",
-        },
-        "奔流气息": {
-            "ten": "cmd=exchange&subtype=2&type=1205&times=10&costtype=3",
-            "one": "cmd=exchange&subtype=2&type=1205&times=1&costtype=3",
-        },
-        "潜能果实": {
-            "ten": "cmd=exchange&subtype=2&type=1200&times=10&costtype=2",
-            "one": "cmd=exchange&subtype=2&type=1200&times=1&costtype=2",
-        },
-        "上古玉髓": {
-            "ten": "cmd=exchange&subtype=2&type=1201&times=10&costtype=2",
-            "one": "cmd=exchange&subtype=2&type=1201&times=1&costtype=2",
-        },
-        "神兵原石": {
-            "ten": "cmd=arena&op=exchange&id=3573&times=10",
-            "one": "cmd=arena&op=exchange&id=3573&times=1",
-        },
-        "软猥金丝": {
-            "ten": "cmd=arena&op=exchange&id=3574&times=10",
-            "one": "cmd=arena&op=exchange&id=3574&times=1",
-        },
+        "凤凰羽毛": "cmd=exchange&subtype=2&type=1100&costtype=1",
+        "奔流气息": "cmd=exchange&subtype=2&type=1205&costtype=3",
+        "潜能果实": "cmd=exchange&subtype=2&type=1200&costtype=2",
+        "上古玉髓": "cmd=exchange&subtype=2&type=1201&costtype=2",
+        "神兵原石": "cmd=arena&op=exchange&id=3573",
+        "软猥金丝": "cmd=arena&op=exchange&id=3574",
     }
 
     PAGE_DATA = [
@@ -796,7 +772,7 @@ class ShenZhuang(BaseUpgrader):
         """神装进阶"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=outfit&op=4&auto_buy=2&magic_outfit_id={_id}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -815,25 +791,11 @@ class ShenZhuang(BaseUpgrader):
 
 
 class ShenJi(BaseUpgrader):
-    """神技自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "矿洞": {
-            "ten": "cmd=exchange&subtype=2&type=1206&times=10&costtype=3",
-            "one": "cmd=exchange&subtype=2&type=1206&times=1&costtype=3",
-        },
-        "掠夺": {
-            "ten": "cmd=exchange&subtype=2&type=1202&times=10&costtype=2",
-            "one": "cmd=exchange&subtype=2&type=1202&times=1&costtype=2",
-        },
-        "踢馆": {
-            "ten": "cmd=exchange&subtype=2&type=1101&times=10&costtype=1",
-            "one": "cmd=exchange&subtype=2&type=1101&times=1&costtype=1",
-        },
-        "竞技场": {
-            "ten": "cmd=arena&op=exchange&id=3567&times=10",
-            "one": "cmd=arena&op=exchange&id=3567&times=1",
-        },
+        "矿洞": "cmd=exchange&subtype=2&type=1206&costtype=3",
+        "掠夺": "cmd=exchange&subtype=2&type=1202&costtype=2",
+        "踢馆": "cmd=exchange&subtype=2&type=1101&costtype=1",
+        "竞技场": "cmd=arena&op=exchange&id=3567",
     }
 
     def __init__(self, d: DaLeDou, store_name: str, store_points: int):
@@ -856,7 +818,7 @@ class ShenJi(BaseUpgrader):
         data = {}
         store_exchange_num = self.store_points // 40
         consume_name = "神秘精华"
-        possess_num = get_backpack_number(self.d, "3567")
+        possess_num = self.d.get_backpack_number("3567")
 
         for _id in self.get_data_id():
             self.d.get(f"cmd=outfit&op=2&magic_skill_id={_id}")
@@ -887,7 +849,7 @@ class ShenJi(BaseUpgrader):
         """神技升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=outfit&op=8&auto_buy=2&magic_outfit_id={_id}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -905,10 +867,6 @@ class ShenJi(BaseUpgrader):
 
 
 def 神装(d: DaLeDou):
-    """
-    神装：自动兑换强化
-    神技：自动兑换强化
-    """
     while True:
         category = Input.select("请选择分类：", ["神装", "神技"])
         if category is None:
@@ -934,36 +892,16 @@ def 神装(d: DaLeDou):
 
 
 class XingPan(BaseUpgrader):
-    """星石自动兑换合成"""
-
     EXCHANGE_URL_MAP = {
-        "翡翠石": {
-            "ten": "cmd=exchange&subtype=2&type=1233&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1233&times=1&costtype=9",
-        },
-        "玛瑙石": {
-            "ten": "cmd=exchange&subtype=2&type=1234&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1234&times=1&costtype=9",
-        },
-        "迅捷石": {
-            "ten": "cmd=exchange&subtype=2&type=1235&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1235&times=1&costtype=9",
-        },
-        "紫黑玉": {
-            "ten": "cmd=exchange&subtype=2&type=1236&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1236&times=1&costtype=9",
-        },
-        "日曜石": {
-            "ten": "cmd=exchange&subtype=2&type=1237&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1237&times=1&costtype=9",
-        },
-        "月光石": {
-            "ten": "cmd=exchange&subtype=2&type=1238&times=10&costtype=9",
-            "one": "cmd=exchange&subtype=2&type=1238&times=1&costtype=9",
-        },
+        "翡翠石": "cmd=exchange&subtype=2&type=1233&costtype=9",
+        "玛瑙石": "cmd=exchange&subtype=2&type=1234&costtype=9",
+        "迅捷石": "cmd=exchange&subtype=2&type=1235&costtype=9",
+        "紫黑玉": "cmd=exchange&subtype=2&type=1236&costtype=9",
+        "日曜石": "cmd=exchange&subtype=2&type=1237&costtype=9",
+        "月光石": "cmd=exchange&subtype=2&type=1238&costtype=9",
     }
 
-    PRICE = {
+    STAR_PRICE = {
         "翡翠石": 32,
         "玛瑙石": 40,
         "迅捷石": 40,
@@ -972,7 +910,7 @@ class XingPan(BaseUpgrader):
         "月光石": 32,
     }
 
-    STAR_GEM = {
+    STAR_TYPE_MAP = {
         "日曜石": 1,
         "玛瑙石": 2,
         "迅捷石": 3,
@@ -992,82 +930,90 @@ class XingPan(BaseUpgrader):
         6: 2,  # 2个6级星石合成一个7级星石
     }
 
-    def __init__(self, d: DaLeDou, synth_level: int):
-        self.synth_level = synth_level
-        self.synth_count = {}
+    def __init__(self, d: DaLeDou, target_level: int, target_quantity: int = 1):
+        self.target_level = target_level
+        self.target_quantity = target_quantity
+        self.required_counts = {}
         super().__init__(d)
 
-    def compute_exchange_level1_num(
-        self, name: str, level: int, star_number: dict, count=1
+    def calculate_required_level1_stones(
+        self,
+        name: str,
+        current_level: int,
+        star_counts: dict,
+        required_count: int = 1,
     ) -> int:
-        """返回一级某星石兑换数量"""
-        self.synth_count[name][level] = count
-        # 下一级
-        level -= 1
-        # 次级拥有数量
-        possess_num = star_number[level]
-        # 次级消耗数量
-        consume_num = self.SYNTHESIS_RULES[level] * count
+        """计算需要的一级星石数量"""
+        self.required_counts[name][current_level] = required_count
+        # 计算下一级
+        next_level = current_level - 1
+        # 下一级星石拥有数量
+        next_level_count = star_counts[next_level]
+        # 下一级星石消耗数量
+        required_next_level_count = self.SYNTHESIS_RULES[next_level] * required_count
 
-        if possess_num >= consume_num:
+        if next_level_count >= required_next_level_count:
             return 0
         else:
-            number = consume_num - possess_num
-            if level == 1:
+            deficit = required_next_level_count - next_level_count
+            if next_level == 1:
                 # 一级星石兑换数量
-                return number
+                return deficit
             else:
-                return self.compute_exchange_level1_num(
-                    name, level, star_number, number
+                return self.calculate_required_level1_stones(
+                    name, next_level, star_counts, deficit
                 )
 
-    def get_synth_id(self, name: str) -> dict[int, str]:
-        """返回2~7级星石合成id"""
-        gem = self.STAR_GEM[name]
-        self.d.get(f"cmd=astrolabe&op=showgemupgrade&gem_type={gem}")
-        _ids = self.d.findall(r"gem=(\d+)")[1:]
-        return {level: synth_id for level, synth_id in enumerate(_ids, start=2)}
+    def get_synthesis_ids(self, name: str) -> dict[int, str]:
+        """获取2~7级星石合成id"""
+        star_type = self.STAR_TYPE_MAP[name]
+        self.d.get(f"cmd=astrolabe&op=showgemupgrade&gem_type={star_type}")
+        ids = self.d.findall(r"gem=(\d+)")[1:]
+        return {level: synthesis_id for level, synthesis_id in enumerate(ids, start=2)}
 
-    def get_store_max_number(self, name: str, store_points: int) -> int:
-        """返回幻境商店星石最大兑换数量"""
-        if price := self.PRICE.get(name):
+    def get_max_exchange_count(self, name: str, store_points: int) -> int:
+        """获取商店最大可兑换数量"""
+        if price := self.STAR_PRICE.get(name):
             return store_points // price
         return 0
 
     def get_data(self) -> dict:
-        """获取1~6级星石数量及2~7级星石合成id"""
+        """获取星盘数据"""
         data = {}
         store_name = "幻境"
         store_points = get_store_points(self.d, "cmd=exchange&subtype=10&costtype=9")
 
-        for name, gem in self.STAR_GEM.items():
-            self.d.get(f"cmd=astrolabe&op=showgemupgrade&gem_type={gem}")
+        for name, star_type in self.STAR_TYPE_MAP.items():
+            self.d.get(f"cmd=astrolabe&op=showgemupgrade&gem_type={star_type}")
             result = self.d.findall(r"（(\d+)）")[1:]
 
-            self.synth_count[name] = {level: 0 for level in range(2, self.synth_level)}
+            self.required_counts[name] = {
+                level: 0 for level in range(2, self.target_level)
+            }
             # 1~6级星石数量
-            star_number = {i + 1: int(item) for i, item in enumerate(result)}
+            star_counts = {i + 1: int(count) for i, count in enumerate(result)}
             # 幻境商店可兑换数量
-            store_exchange_num = self.get_store_max_number(name, store_points)
-            # 一级星石兑换数量
-            exchange_level1_num = self.compute_exchange_level1_num(
-                name, self.synth_level, star_number
+            max_exchange_count = self.get_max_exchange_count(name, store_points)
+            # 需要的一级星石数量
+            required_level1_count = self.calculate_required_level1_stones(
+                name, self.target_level, star_counts, self.target_quantity
             )
 
             data[name] = {
                 "名称": name,
-                "1级数量": star_number[1],
-                "2级数量": star_number[2],
-                "3级数量": star_number[3],
-                "4级数量": star_number[4],
-                "5级数量": star_number[5],
-                "6级数量": star_number[6],
-                "积分": f"{store_points}（{store_exchange_num}）",
-                "一级星石兑换数量": exchange_level1_num,
-                "合成等级": self.synth_level,
-                "是否强化": store_exchange_num >= exchange_level1_num,
+                "1级数量": star_counts[1],
+                "2级数量": star_counts[2],
+                "3级数量": star_counts[3],
+                "4级数量": star_counts[4],
+                "5级数量": star_counts[5],
+                "6级数量": star_counts[6],
+                "积分": f"{store_points}（{max_exchange_count}）",
+                "需要一级星石数量": required_level1_count,
+                "目标等级": self.target_level,
+                "目标数量": self.target_quantity,
+                "是否强化": max_exchange_count >= required_level1_count,
                 "consume_name": name,
-                "consume_num": exchange_level1_num,
+                "consume_num": required_level1_count,
                 "possess_num": 0,
                 "store_name": store_name,
             }
@@ -1080,31 +1026,34 @@ class XingPan(BaseUpgrader):
             if not e.is_exchange():
                 return
 
-        synth_id = self.get_synth_id(name)
-        for level, count in self.synth_count[name].items():
+        synthesis_ids = self.get_synthesis_ids(name)
+        for level, count in self.required_counts[name].items():
             if count == 0:
                 continue
 
-            _id = synth_id[level]
+            synthesis_id = synthesis_ids[level]
             for _ in range(count):
                 # 合成
-                self.d.get(f"cmd=astrolabe&op=upgradegem&gem={_id}")
+                self.d.get(f"cmd=astrolabe&op=upgradegem&gem={synthesis_id}")
                 self.d.log(self.d.find(r"规则</a><br />(.*?)<"), f"{level}级{name}")
 
 
 def 星盘(d: DaLeDou):
-    """星石自动兑换合成"""
-    level_list = ["2", "3", "4", "5", "6", "7"]
+    available_levels = ["2", "3", "4", "5", "6", "7"]
     while True:
-        synth_level = Input.select("请选择合成星石等级：", level_list)
-        if synth_level is None:
+        target_level = Input.select("请选择目标星石等级：", available_levels)
+        if target_level is None:
             return
-        upgrade(XingPan(d, int(synth_level)))
+
+        target_quantity = Input.number("请输入合成数量：")
+        print_separator()
+        if target_quantity is None:
+            return
+
+        upgrade(XingPan(d, int(target_level), target_quantity))
 
 
 class YongBing(BaseUpgrader):
-    """佣兵自动资质还童、悟性提升、阅历突飞"""
-
     def __init__(self, d: DaLeDou, category: str):
         self.category = category
         super().__init__(d)
@@ -1145,11 +1094,12 @@ class YongBing(BaseUpgrader):
             # 提升
             self.d.get(f"cmd=newmercenary&sub=4&id={_id}&count=10&tfl=1")
             self.d.log(self.d.find(), name)
+            if "突飞成功" not in self.d.html:
+                break
+
             self.d.log(self.d.find(r"等级：(\d+)"), "等级")
             self.d.log(self.d.find(r"经验：(.*?)<"), "经验")
             self.d.log(self.d.find(r"消耗阅历（(\d+)"), "阅历")
-            if "突飞成功" not in self.d.html:
-                break
 
     def get_data(self) -> dict:
         """获取佣兵数据"""
@@ -1207,7 +1157,6 @@ class YongBing(BaseUpgrader):
 
 
 def 佣兵(d: DaLeDou):
-    """佣兵自动资质还童、悟性提升、阅历突飞"""
     while True:
         category = Input.select("请选择分类：", ["资质还童", "悟性提升", "阅历突飞"])
         if category is None:
@@ -1216,25 +1165,11 @@ def 佣兵(d: DaLeDou):
 
 
 class WuQiZhuanJing(BaseUpgrader):
-    """武器专精自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "投掷武器符文石": {
-            "ten": "cmd=exchange&subtype=2&type=1208&times=10&costtype=4",
-            "one": "cmd=exchange&subtype=2&type=1208&times=1&costtype=4",
-        },
-        "小型武器符文石": {
-            "ten": "cmd=exchange&subtype=2&type=1211&times=10&costtype=4",
-            "one": "cmd=exchange&subtype=2&type=1211&times=1&costtype=4",
-        },
-        "中型武器符文石": {
-            "ten": "cmd=exchange&subtype=2&type=1210&times=10&costtype=4",
-            "one": "cmd=exchange&subtype=2&type=1210&times=1&costtype=4",
-        },
-        "大型武器符文石": {
-            "ten": "cmd=exchange&subtype=2&type=1213&times=10&costtype=4",
-            "one": "cmd=exchange&subtype=2&type=1213&times=1&costtype=4",
-        },
+        "投掷武器符文石": "cmd=exchange&subtype=2&type=1208&costtype=4",
+        "小型武器符文石": "cmd=exchange&subtype=2&type=1211&costtype=4",
+        "中型武器符文石": "cmd=exchange&subtype=2&type=1210&costtype=4",
+        "大型武器符文石": "cmd=exchange&subtype=2&type=1213&costtype=4",
     }
 
     def __init__(self, d: DaLeDou):
@@ -1294,7 +1229,7 @@ class WuQiZhuanJing(BaseUpgrader):
         """武器专精升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=weapon_specialize&op=9&type_id={_id}&auto_buy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -1313,13 +1248,8 @@ class WuQiZhuanJing(BaseUpgrader):
 
 
 class WuQiLan(BaseUpgrader):
-    """专精武器栏自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "千年寒铁": {
-            "ten": "cmd=exchange&subtype=2&type=1209&times=10&costtype=4",
-            "one": "cmd=exchange&subtype=2&type=1209&times=1&costtype=4",
-        }
+        "千年寒铁": "cmd=exchange&subtype=2&type=1209&costtype=4",
     }
 
     def __init__(self, d: DaLeDou):
@@ -1374,7 +1304,7 @@ class WuQiLan(BaseUpgrader):
         """专精武器栏升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=weapon_specialize&op=10&storage_id={_id}&auto_buy=0"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -1393,10 +1323,6 @@ class WuQiLan(BaseUpgrader):
 
 
 def 专精(d: DaLeDou):
-    """
-    武器专精：自动兑换强化
-    武器栏：自动兑换强化
-    """
     while True:
         category = Input.select("请选择分类：", ["武器专精", "武器栏"])
         if category is None:
@@ -1408,13 +1334,8 @@ def 专精(d: DaLeDou):
 
 
 class LingShouPian(BaseUpgrader):
-    """神魔录灵兽篇自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "神魔残卷": {
-            "ten": "cmd=exchange&subtype=2&type=1267&times=10&costtype=14",
-            "one": "cmd=exchange&subtype=2&type=1267&times=1&costtype=14",
-        }
+        "神魔残卷": "cmd=exchange&subtype=2&type=1267&costtype=14",
     }
 
     def __init__(self, d: DaLeDou):
@@ -1467,7 +1388,7 @@ class LingShouPian(BaseUpgrader):
         """灵兽篇提升"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=ancient_gods&op=5&autoBuy=0&id={_id}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -1486,13 +1407,8 @@ class LingShouPian(BaseUpgrader):
 
 
 class GuZhenPian(BaseUpgrader):
-    """古阵篇自动兑换突破"""
-
     EXCHANGE_URL_MAP = {
-        "突破石": {
-            "ten": "cmd=exchange&subtype=2&type=1266&times=10&costtype=14",
-            "one": "cmd=exchange&subtype=2&type=1266&times=1&costtype=14",
-        }
+        "突破石": "cmd=exchange&subtype=2&type=1266&costtype=14",
     }
 
     # 背包碎片id
@@ -1515,7 +1431,7 @@ class GuZhenPian(BaseUpgrader):
         t_store_exchange_num = store_points // 40
         t_consume_name = "突破石"
         # 突破石拥有数量
-        t_possess_num = get_backpack_number(self.d, "5153")
+        t_possess_num = self.d.get_backpack_number("5153")
 
         for _id in ["1", "2", "3", "4"]:
             # 宝物详情
@@ -1536,7 +1452,7 @@ class GuZhenPian(BaseUpgrader):
             # 碎片消耗数量
             s_consume_num = int(self.d.find(r"碎片\*(\d+)"))
             # 碎片拥有数量
-            s_possess_num = get_backpack_number(self.d, self.S_ID[s_consume_name])
+            s_possess_num = self.d.get_backpack_number(self.S_ID[s_consume_name])
 
             data[name] = {
                 "名称": name,
@@ -1567,10 +1483,6 @@ class GuZhenPian(BaseUpgrader):
 
 
 def 神魔录(d: DaLeDou):
-    """
-    灵兽篇：自动兑换强化
-    古阵篇：自动兑换突破（仅兑换突破石）
-    """
     while True:
         category = Input.select("请选择分类：", ["灵兽篇", "古阵篇"])
         if category is None:
@@ -1581,574 +1493,11 @@ def 神魔录(d: DaLeDou):
             upgrade(GuZhenPian(d))
 
 
-def jiang_hu_chang_meng(
-    d: DaLeDou,
-    name: str,
-    ins_id: str,
-    incense_burner_number: int,
-    copy_duration: int,
-    event,
-):
-    """运行江湖长梦副本的公共函数
-
-    参数:
-        d：DaLeDou实例
-        name：副本名称
-        ins_id：副本ID
-        incense_burner_number：香炉数量
-        copy_duration：副本时长
-        event：处理每天事件的函数
-    """
-    for i in range(incense_burner_number):
-        # 开启副本
-        d.get(f"cmd=jianghudream&op=beginInstance&ins_id={ins_id}")
-        if "帮助" in d.html:
-            # 您还未编辑副本队伍，无法开启副本
-            d.log(d.find(), name).append()
-            return
-
-        print_separator()
-        count = i + 1
-        print(f"第 {count} 次（余 {incense_burner_number - count}）")
-        print_separator()
-
-        for day in range(copy_duration + 1):
-            if "进入下一天" in d.html:
-                # 进入下一天
-                d.get("cmd=jianghudream&op=goNextDay")
-                day += 1
-            else:
-                d.log("请手动通关剩余天数后再使用脚本", f"{name}-第{day}天")
-                return
-
-            is_defeat = event(day)
-            if is_defeat:
-                break
-
-        # 结束回忆
-        d.get("cmd=jianghudream&op=endInstance")
-        d.log(d.find(), name).append()
-
-        if is_defeat:
-            return
-
-    # 领取首通奖励
-    d.get(f"cmd=jianghudream&op=getFirstReward&ins_id={ins_id}")
-    d.log(d.find(), name).append()
-
-
-def 柒承的忙碌日常(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高550金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _id := d.find(r'event_id=(\d+)">战斗'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            # 视而不见
-            d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">商店'):
-            # 商店
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 群英拭剑谁为峰(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高550金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _id := d.find(r'event_id=(\d+)">战斗\(等级2\)'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 时空守护者(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高450金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _id := d.find(r'event_id=(\d+)">战斗\(等级2\)'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _ids := d.findall(r'event_id=(\d+)">战斗\(等级1\)'):
-            if day == 2 or day == 4:
-                _id = _ids[-1]
-            else:
-                _id = _ids[0]
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _ids := d.findall(r'event_id=(\d+)">奇遇\(等级2\)'):
-            if day == 5:
-                _id = _ids[-1]
-            else:
-                _id = _ids[0]
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if "上前询问" in d.html:
-                # 上前询问
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 一口答应
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            elif "解释身份" in d.html:
-                # 解释身份
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 题诗一首
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            elif "原地思考" in d.html:
-                # 原地思考
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 默默低语
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=3")
-            elif "放她回去" in d.html:
-                # 放她回去
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级1\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if "转一次" in d.html:
-                # 转一次
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=3")
-            elif "漩涡1" in d.html:
-                # 漩涡1
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">商店'):
-            # 商店
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 倚天屠龙归我心(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高558金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _id := d.find(r'event_id=(\d+)">战斗\(等级2\)'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">战斗\(等级1\)'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if day in [1, 3, 7]:
-                # 前辈、开始回忆、狠心离去
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            elif day in [6, 8]:
-                # 昏昏沉沉、独自神伤
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=3")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">商店'):
-            # 商店
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 神雕侠侣(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高500金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _id := d.find(r'event_id=(\d+)">战斗\(等级2\)'):
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            # 笼络侠客
-            d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=3")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">商店'):
-            # 商店
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 雪山藏魂(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高490金币"""
-
-    is_conversation = False
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        nonlocal is_conversation
-
-        if day == 4:
-            if _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-                # 奇遇
-                d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 尝试交谈（获得银狐玩偶）
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                is_conversation = True
-                # 询问大侠
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                return False
-
-        if _ids := d.findall(r'event_id=(\d+)">战斗\(等级2\)'):
-            if day in [2, 5]:
-                _id = _ids[-1]
-            else:
-                _id = _ids[0]
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if day == 1:
-                # 捉迷藏
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            elif day == 6:
-                if is_conversation:
-                    # 飞书（需银狐玩偶）
-                    d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-                else:
-                    # 刀剑归真
-                    d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-        elif _id := d.find(r'event_id=(\d+)">商店'):
-            # 商店
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 桃花自古笑春风(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高520金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _ids := d.findall(r'event_id=(\d+)">战斗\(等级2\)'):
-            _id = _ids[-1]
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if day == 1:
-                # 过去看看
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 以西湖来对
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            elif day == 5:
-                # 我的
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            elif day == 7:
-                # 摸黑进入
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 纯路人
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 战乱襄阳(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高480金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _ids := d.findall(r'event_id=(\d+)">战斗\(等级2\)'):
-            _id = _ids[-1]
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇\(等级2\)'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if day == 4:
-                for _ in range(3):
-                    # 向左突围 > 周遭探查 > 捣毁粮仓
-                    d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-                    d.log(
-                        d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天"
-                    )
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def 天涯浪子(
-    d: DaLeDou, name: str, ins_id: str, incense_burner_number: int, copy_duration: int
-):
-    """最高355金币"""
-
-    def event(day: int) -> bool:
-        """战败返回True，否则返回False"""
-        if _ids := d.findall(r'event_id=(\d+)">战斗'):
-            _id = _ids[-1]
-            # 战斗
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            # FIGHT!
-            d.get("cmd=jianghudream&op=doPveFight")
-            d.log(d.find(r"<p>(.*?)<br />"), f"{name}-第{day}天")
-            if "战败" in d.html:
-                return True
-        elif _id := d.find(r'event_id=(\d+)">奇遇'):
-            # 奇遇
-            d.get(f"cmd=jianghudream&op=chooseEvent&event_id={_id}")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-            if day == 1:
-                # 问其身份
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 锦囊2
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            elif day == 2:
-                # 重金求见
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 相约明日
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            elif day == 3:
-                # 阁楼3
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=3")
-            elif day == 4:
-                # 结为姐弟
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-            elif day == 5:
-                # 筹备计划
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=2")
-                d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-                # 是
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            elif day == 6:
-                # 锦囊1
-                d.get("cmd=jianghudream&op=chooseAdventure&adventure_id=1")
-            d.log(d.find(r"获得金币：\d+<br />(.*?)<br />"), f"{name}-第{day}天")
-
-        return False
-
-    jiang_hu_chang_meng(d, name, ins_id, incense_burner_number, copy_duration, event)
-
-
-def get_open_copy_data(d: DaLeDou) -> dict:
-    """获取开放副本数据"""
-    base_data = {
-        "柒承的忙碌日常": {
-            "material_name": "追忆香炉",
-            "material_id": "6477",
-            "ins_id": "1",
-        },
-        "群英拭剑谁为峰": {
-            "material_name": "拭剑香炉",
-            "material_id": "6940",
-            "ins_id": "32",
-        },
-        "时空守护者": {
-            "material_name": "时空香炉",
-            "material_id": "6532",
-            "ins_id": "47",
-        },
-        "倚天屠龙归我心": {
-            "material_name": "九阳香炉",
-            "material_id": "6904",
-            "ins_id": "48",
-        },
-        "神雕侠侣": {
-            "material_name": "盛世香炉",
-            "material_id": "6476",
-            "ins_id": "49",
-        },
-        "雪山藏魂": {
-            "material_name": "雪山香炉",
-            "material_id": "8121",
-            "ins_id": "50",
-        },
-        "桃花自古笑春风": {
-            "material_name": "桃花香炉",
-            "material_id": "6825",
-            "ins_id": "51",
-        },
-        "战乱襄阳": {
-            "material_name": "忠义香炉",
-            "material_id": "6888",
-            "ins_id": "52",
-        },
-        "天涯浪子": {
-            "material_name": "中秋香炉",
-            "material_id": "6547",
-            "ins_id": "53",
-        },
-    }
-
-    print_separator()
-    copy_data = {}
-    for k, v in base_data.items():
-        material_name = v["material_name"]
-        material_id = v["material_id"]
-        ins_id = v["ins_id"]
-
-        incense_burner_number = get_backpack_number(d, material_id)
-        if incense_burner_number == 0:
-            print(f"{k}（{material_name}不足）")
-            continue
-
-        d.get(f"cmd=jianghudream&op=showCopyInfo&id={ins_id}")
-        copy_duration = int(d.find(r"副本时长：(\d+)"))
-        if "常规副本" in d.html:
-            copy_data[k] = v
-            copy_data[k]["copy_duration"] = copy_duration
-            copy_data[k]["incense_burner_number"] = incense_burner_number
-            continue
-
-        year = int(d.find(r"-(\d+)年"))
-        month = int(d.find(r"-\d+年(\d+)月"))
-        day = int(d.find(r"-\d+年\d+月(\d+)日"))
-        end_time = datetime(2000 + year, month, day, 6, 0)
-        current_time = datetime.now()
-        if current_time < end_time:
-            copy_data[k] = v
-            copy_data[k]["copy_duration"] = copy_duration
-            copy_data[k]["incense_burner_number"] = incense_burner_number
-        else:
-            print(f"{k}（未开启）")
-
-    if len(base_data) != len(copy_data):
-        print_separator()
-    return copy_data
-
-
-def 江湖长梦(d: DaLeDou):
-    """江湖长梦副本挑战次数即香炉数量，战败则提前结束"""
-    while True:
-        data = get_open_copy_data(d)
-        category = Input.select("请选择分类：", list(data))
-        if category is None:
-            return
-
-        material_name = data[category]["material_name"]
-        ins_id = data[category]["ins_id"]
-        incense_burner_number = data[category]["incense_burner_number"]
-        copy_duration = data[category]["copy_duration"]
-        print_separator()
-        print(f"{material_name}数量：{incense_burner_number}")
-
-        globals()[category](d, category, ins_id, incense_burner_number, copy_duration)
-
-
 class SanHun(BaseUpgrader):
-    """深渊之潮灵枢精魄三魂自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "御魂丹-天": {
-            "ten": "cmd=abysstide&op=abyssexchange&id=1&times=10",
-            "one": "cmd=abysstide&op=abyssexchange&id=1&times=1",
-        },
-        "御魂丹-地": {
-            "ten": "cmd=abysstide&op=abyssexchange&id=2&times=10",
-            "one": "cmd=abysstide&op=abyssexchange&id=2&times=1",
-        },
-        "御魂丹-命": {
-            "ten": "cmd=abysstide&op=abyssexchange&id=3&times=10",
-            "one": "cmd=abysstide&op=abyssexchange&id=3&times=1",
-        },
+        "御魂丹-天": "cmd=abysstide&op=abyssexchange&id=1",
+        "御魂丹-地": "cmd=abysstide&op=abyssexchange&id=2",
+        "御魂丹-命": "cmd=abysstide&op=abyssexchange&id=3",
     }
 
     def __init__(self, d: DaLeDou):
@@ -2196,7 +1545,7 @@ class SanHun(BaseUpgrader):
         """三魂进阶"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=abysstide&op=setauto&value=0&soul_id={_id}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         e = super().exchange_instances(name, self.EXCHANGE_URL_MAP)
@@ -2216,37 +1565,14 @@ class SanHun(BaseUpgrader):
 
 
 class QiPo(BaseUpgrader):
-    """深渊之潮灵枢精魄七魄自动兑换强化"""
-
     EXCHANGE_URL_MAP = {
-        "气魄之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=5",
-            "one": "cmd=abysstide&op=wishexchange&id=5",
-        },
-        "力魄之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=6",
-            "one": "cmd=abysstide&op=wishexchange&id=6",
-        },
-        "精魄之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=7",
-            "one": "cmd=abysstide&op=wishexchange&id=7",
-        },
-        "英魄之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=8",
-            "one": "cmd=abysstide&op=wishexchange&id=8",
-        },
-        "中枢之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=9",
-            "one": "cmd=abysstide&op=wishexchange&id=9",
-        },
-        "天冲之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=10",
-            "one": "cmd=abysstide&op=wishexchange&id=10",
-        },
-        "灵慧之书": {
-            "ten": "cmd=abysstide&op=wishexchange&id=11",
-            "one": "cmd=abysstide&op=wishexchange&id=11",
-        },
+        "气魄之书": "cmd=abysstide&op=wishexchange&id=5",
+        "力魄之书": "cmd=abysstide&op=wishexchange&id=6",
+        "精魄之书": "cmd=abysstide&op=wishexchange&id=7",
+        "英魄之书": "cmd=abysstide&op=wishexchange&id=8",
+        "中枢之书": "cmd=abysstide&op=wishexchange&id=9",
+        "天冲之书": "cmd=abysstide&op=wishexchange&id=10",
+        "灵慧之书": "cmd=abysstide&op=wishexchange&id=11",
     }
 
     def __init__(self, d: DaLeDou):
@@ -2336,10 +1662,6 @@ class QiPo(BaseUpgrader):
 
 
 def 深渊之潮(d: DaLeDou):
-    """
-    灵枢精魄三魂：自动兑换强化
-    灵枢精魄七魄：自动兑换强化
-    """
     while True:
         category = Input.select("请选择分类：", ["三魂", "七魄"])
         if category is None:
@@ -2351,10 +1673,11 @@ def 深渊之潮(d: DaLeDou):
 
 
 def 问道(d: DaLeDou):
-    print_separator()
-    # 关闭自动斗豆
-    d.get("cmd=immortals&op=setauto&type=0&status=0")
-    d.log("问道关闭自动斗豆")
+    name = "问道"
+    close_url = "cmd=immortals&op=setauto&type=0&status=0"
+    if not is_close_auto_buy(d, name, close_url):
+        return
+
     while True:
         # 问道10次
         d.get("cmd=immortals&op=asktao&times=10")
@@ -2368,8 +1691,6 @@ def 问道(d: DaLeDou):
 
 
 class XianWuXiuZhen(BaseUpgrader):
-    """仙武修真宝物自动强化"""
-
     def __init__(self, d: DaLeDou):
         super().__init__(d)
 
@@ -2433,24 +1754,20 @@ class XianWuXiuZhen(BaseUpgrader):
         """法宝升级"""
         _id: str = self.data[name]["id"]
         close_url = f"cmd=immortals&op=setauto&type=1&status=0&treasureid={_id}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         while True:
-            print_separator()
             # 升级
             self.d.get(f"cmd=immortals&op=upgrade&treasureid={_id}&times=1")
             self.d.log(self.d.find(r'id">(.*?)<'), name)
             self.d.log(self.d.find(r"祝福值：(.*?)&"), name)
             if "升级失败" not in self.d.html:
                 break
+            print_separator()
 
 
 def 仙武修真(d: DaLeDou):
-    """
-    问道：问道并一键炼化制作书
-    宝物：自动强化
-    """
     while True:
         category = Input.select("请选择分类：", ["问道", "宝物"])
         if category is None:
@@ -2462,8 +1779,6 @@ def 仙武修真(d: DaLeDou):
 
 
 class XinYuanYingShenQi(BaseUpgrader):
-    """新元婴神器自动强化"""
-
     CATRGORY_URL = {
         "投掷武器": "op=1&type=0",
         "小型武器": "op=1&type=1",
@@ -2546,11 +1861,10 @@ class XinYuanYingShenQi(BaseUpgrader):
         _id: str = self.data[name]["id"]
         t = self.CATRGORY_TYPE[self.category]
         close_url = f"cmd=newAct&subtype=104&op=4&autoBuy=0&type={t}"
-        if not super().is_close_auto_buy(name, close_url):
+        if not is_close_auto_buy(self.d, name, close_url):
             return
 
         while True:
-            print_separator()
             # 升级一次
             self.d.get(
                 f"cmd=newAct&subtype=104&op=3&one_click=0&item_id={_id}&type={t}"
@@ -2561,10 +1875,10 @@ class XinYuanYingShenQi(BaseUpgrader):
             )
             if "恭喜您" in self.d.html:
                 break
+            print_separator()
 
 
 def 新元婴神器(d: DaLeDou):
-    """新元婴神器自动强化"""
     category_list = [
         "投掷武器",
         "小型武器",
@@ -2583,22 +1897,21 @@ def 新元婴神器(d: DaLeDou):
 
 
 class 巅峰之战进行中:
-    """夺宝奇兵太空探宝场景自动投掷"""
-
     def __init__(self, d: DaLeDou):
         self.d = d
 
         while True:
             self.current_exploits = self.get_exploits()
-            print_separator()
             print(f"当前战功：{self.current_exploits}")
             print_separator()
             self.retain_exploits = Input.number("请输入要保留的战功：")
             if self.retain_exploits is None:
                 break
+            print_separator()
             if self.retain_exploits > self.current_exploits:
                 continue
             self.pelted()
+            print_separator()
 
     def get_exploits(self) -> int:
         """获取五行战功"""
@@ -2608,7 +1921,6 @@ class 巅峰之战进行中:
 
     def pelted(self):
         """太空探宝16倍场景投掷"""
-        print_separator()
         while self.retain_exploits < self.current_exploits:
             # 投掷
             self.d.get("cmd=element&subtype=7")
@@ -2623,4 +1935,3 @@ class 巅峰之战进行中:
                     self.d.log(self.d.find(r"】<br />(.*?)<br />"), "夺宝奇兵")
                 # 选择太空探宝
                 self.d.get("cmd=element&subtype=15&gameType=3")
-                print_separator()

@@ -7,8 +7,41 @@ import random
 from ..core.daledou import DaLeDou
 
 
+def c_get_doushenta_cd(d: DaLeDou) -> int:
+    """返回斗神塔冷却时间"""
+    # 达人等级对应斗神塔CD时间
+    cd = {
+        "1": 7,
+        "2": 6,
+        "3": 5,
+        "4": 4,
+        "5": 3,
+        "6": 2,
+        "7": 1,
+        "8": 1,
+        "9": 1,
+        "10": 1,
+    }
+    # 乐斗达人
+    d.get("cmd=ledouvip")
+    if level := d.find(r"当前级别：(\d+)"):
+        return cd[level]
+    else:
+        # 还未成为达人
+        return 10
+
+
+def c_get_exchange_config(config: list[dict]):
+    """返回兑换名称、兑换id和兑换数量"""
+    for item in config:
+        name: str = item["name"]
+        _id: int = item["id"]
+        exchange_quantity: int = item["exchange_quantity"]
+        if exchange_quantity > 0:
+            yield name, _id, exchange_quantity
+
+
 def c_邪神秘宝(d: DaLeDou):
-    """高级秘宝和极品秘宝免费一次或者抽奖一次"""
     for i in [0, 1]:
         # 免费一次 或 抽奖一次
         d.get(f"cmd=tenlottery&op=2&type={i}")
@@ -16,18 +49,22 @@ def c_邪神秘宝(d: DaLeDou):
 
 
 def 帮派宝库(d: DaLeDou):
-    # 帮派宝库
-    d.get("cmd=fac_corp&op=0")
-    data = d.findall(r'gift_id=(\d+)&amp;type=(\d+)">点击领取')
-    if not data:
-        d.log("帮派宝库没有礼包领取", "帮派商会-帮派宝库").append()
-        return
+    for _ in range(20):
+        # 帮派宝库
+        d.get("cmd=fac_corp&op=0")
+        data = d.findall(r'gift_id=(\d+)&amp;type=(\d+)">点击领取')
+        if not data:
+            d.log("帮派宝库没有礼包领取", "帮派商会-帮派宝库").append()
+            return
 
-    for _id, t in data:
-        d.get(f"cmd=fac_corp&op=3&gift_id={_id}&type={t}")
-        d.log(d.find(r"</p>(.*?)<br />"), "帮派商会-帮派宝库").append()
-        if "入帮24小时才能领取商会礼包" in d.html:
-            break
+        for _id, t in data:
+            d.get(f"cmd=fac_corp&op=3&gift_id={_id}&type={t}")
+            d.log(d.find(r"</p>(.*?)<br />"), "帮派商会-帮派宝库").append()
+            if "恭喜您领取了" in d.html:
+                continue
+            # 领取上限
+            # 入帮24小时才能领取商会礼包
+            return
 
 
 def 交易会所(d: DaLeDou):
@@ -69,21 +106,12 @@ def 兑换商店(d: DaLeDou):
 
 
 def c_帮派商会(d: DaLeDou):
-    """
-    帮派宝库：每天领取礼包
-    交易会所：每天交易物品
-    兑换商店：每天兑换物品
-    """
     帮派宝库(d)
     交易会所(d)
     兑换商店(d)
 
 
 def c_任务派遣中心(d: DaLeDou):
-    """
-    领取奖励：每天最多3次
-    接受：每天最多3次；优先S、A级，如果S、A已尝试且没有免费刷新次数则选择B级
-    """
     base_name = "任务派遣中心"
     # 任务派遣中心
     d.get("cmd=missionassign&subtype=0")
@@ -160,12 +188,6 @@ def c_任务派遣中心(d: DaLeDou):
 
 
 def c_侠士客栈(d: DaLeDou):
-    """
-    领取奖励：每天3次
-    客栈奇遇：
-        前来捣乱的xx：与TA理论
-        黑市商人：物品交换，详见配置文件
-    """
     # 侠士客栈
     d.get("cmd=warriorinn")
     for t, n in d.findall(r"type=(\d+)&amp;num=(\d+)"):
@@ -193,24 +215,15 @@ def c_侠士客栈(d: DaLeDou):
 
 
 def c_帮派巡礼(d: DaLeDou):
-    """每天领取巡游赠礼"""
     # 领取巡游赠礼
     d.get("cmd=abysstide&op=getfactiongift")
     d.log(d.find()).append()
 
 
 def c_深渊秘境(d: DaLeDou):
-    """
-    每天兑换副本，兑换次数详见配置文件
-    每天通关副本，副本次数有多少就通关多少次，副本详见配置文件
-    """
-    config: dict = d.config["深渊之潮"]["深渊秘境"]
-    _id: int = config["id"]
+    config: dict = d.config["深渊之潮"]
     exchange_count: int = config["exchange_count"]
-
-    if _id is None:
-        d.log("你没有配置深渊秘境副本").append()
-        return
+    _id: int = config["id"]
 
     for _ in range(exchange_count):
         # 兑换
@@ -243,7 +256,6 @@ def c_深渊秘境(d: DaLeDou):
 
 
 def c_龙凰论武(d: DaLeDou):
-    """每月4~25号每天随机挑战，挑战次数详见配置文件"""
     # 龙凰之境
     d.get("cmd=dragonphoenix&op=lunwu")
     if "已报名" in d.html:
@@ -253,7 +265,7 @@ def c_龙凰论武(d: DaLeDou):
         d.log("进入论武异常，无法挑战").append()
         return
 
-    challenge_count: int = d.config["龙凰之境"]["龙凰论武"]["challenge_count"]
+    challenge_count: int = d.config["龙凰之境"]["challenge_count"]
     for _ in range(challenge_count):
         data = d.findall(r"uin=(\d+).*?idx=(\d+)")
         uin, _idx = random.choice(data)
@@ -267,9 +279,6 @@ def c_龙凰论武(d: DaLeDou):
 
 
 def c_客栈同福(d: DaLeDou):
-    """
-    献酒：每天当有匹配项时献酒，详见配置文件
-    """
     config: list = d.config["客栈同福"]
     if config is None:
         d.log("你没有配置匹配").append()
@@ -301,7 +310,6 @@ def c_客栈同福(d: DaLeDou):
 
 
 def c_幸运金蛋(d: DaLeDou):
-    """砸金蛋一次"""
     # 幸运金蛋
     d.get("cmd=newAct&subtype=110&op=0")
     if i := d.find(r"index=(\d+)"):
@@ -312,8 +320,7 @@ def c_幸运金蛋(d: DaLeDou):
         d.log("没有砸蛋次数了").append()
 
 
-def c_乐斗大笨钟(d: DaLeDou):
-    """领取一次"""
+def c_大笨钟(d: DaLeDou):
     # 领取
     d.get("cmd=newAct&subtype=18")
     d.log(d.find(r"<br /><br /><br />(.*?)<br />")).append()
